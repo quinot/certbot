@@ -1,6 +1,7 @@
 """Common code for DNS Authenticator Plugins."""
 
 import abc
+import dns.resolver
 import logging
 import os
 import stat
@@ -36,6 +37,30 @@ class DNSAuthenticator(common.Plugin):
             type=int,
             help='The number of seconds to wait for DNS to propagate before asking the ACME server '
                  'to verify the DNS record.')
+        add('follow-cnames',
+            action='store_true',
+            default=False,
+            help='If True, and the challenge label has a CNAME record, update the target instead.')
+
+    def validation_domain_name(self, achall):  # pylint: disable=missing-docstring
+        validation_domain_name = orig_validation_domain_name = \
+            achall.validation_domain_name(achall.domain)
+
+        if self.conf('follow-cnames'):
+            followed_names = set()
+            while True:
+                if validation_domain_name in followed_names:
+                    raise errors.PluginError(
+                        'CNAME loop for {0}'.format(orig_validation_domain_name))
+                followed_names.add(validation_domain_name)
+                logger.debug("Looking up %s CNAME", validation_domain_name)
+                try:
+                    answers = dns.resolver.query(validation_domain_name, 'CNAME')
+                    validation_domain_name = answers[0].target.to_text()
+                except dns.resolver.NXDOMAIN:
+                    break
+
+        return validation_domain_name
 
     def get_chall_pref(self, unused_domain): # pylint: disable=missing-docstring,no-self-use
         return [challenges.DNS01]
@@ -51,7 +76,7 @@ class DNSAuthenticator(common.Plugin):
         responses = []
         for achall in achalls:
             domain = achall.domain
-            validation_domain_name = achall.validation_domain_name(domain)
+            validation_domain_name = self.validation_domain_name(achall)
             validation = achall.validation(achall.account_key)
 
             self._perform(domain, validation_domain_name, validation)
@@ -70,7 +95,7 @@ class DNSAuthenticator(common.Plugin):
         if self._attempt_cleanup:
             for achall in achalls:
                 domain = achall.domain
-                validation_domain_name = achall.validation_domain_name(domain)
+                validation_domain_name = self.validation_domain_name(achall)
                 validation = achall.validation(achall.account_key)
 
                 self._cleanup(domain, validation_domain_name, validation)

@@ -1,11 +1,17 @@
 """Tests for certbot.plugins.dns_common."""
 
 import collections
+import dns.name
+import dns.resolver
+import dns.rdataclass
+import dns.rdatatype
+from dns.rdtypes.ANY.CNAME import CNAME
 import logging
 import os
 import unittest
 
 import mock
+from mock import patch
 
 from certbot import errors
 from certbot.display import util as display_util
@@ -34,6 +40,10 @@ class DNSAuthenticatorTest(util.TempDirTestCase, dns_test_common.BaseAuthenticat
         fake_config_key = 1
         fake_other_key = None
         fake_file_path = None
+        fake_follow_cnames = False
+
+    def _cname(self, target):
+        return CNAME(dns.rdataclass.IN, dns.rdatatype.CNAME, dns.name.from_text(target))
 
     def setUp(self):
         super(DNSAuthenticatorTest, self).setUp()
@@ -53,6 +63,38 @@ class DNSAuthenticatorTest(util.TempDirTestCase, dns_test_common.BaseAuthenticat
         self.auth.cleanup([self.achall])
 
         self.auth._cleanup.assert_called_once_with(dns_test_common.DOMAIN, mock.ANY, mock.ANY)
+
+    def test_validation_domain_name(self):
+        vdn = self.auth.validation_domain_name(self.achall)
+
+        self.assertEqual(vdn, self.achall.validation_domain_name(self.achall.domain))
+
+    @patch("dns.resolver.query")
+    def test_validation_domain_name_cname(self, query_mock):
+        vdn = self.achall.validation_domain_name(self.achall.domain)
+        other_target = "alt-challenge.example.com."
+        self.config.fake_follow_cnames = True
+
+        query_mock.side_effect = [[self._cname(other_target)], dns.resolver.NXDOMAIN]
+
+        new_vdn = self.auth.validation_domain_name(self.achall)
+
+        query_mock.assert_has_calls(
+            [mock.call(vdn, 'CNAME'),
+             mock.call(other_target, 'CNAME')])
+        self.assertEqual(new_vdn, other_target)
+
+    @patch("dns.resolver.query")
+    def test_validation_domain_name_cname_loop(self, query_mock):
+        vdn = self.achall.validation_domain_name(self.achall.domain)
+        self.config.fake_follow_cnames = True
+
+        query_mock.return_value = [self._cname(vdn)]
+
+        self.assertRaises(
+            errors.PluginError,
+            self.auth.validation_domain_name,
+            self.achall)
 
     @util.patch_get_utility()
     def test_prompt(self, mock_get_utility):
